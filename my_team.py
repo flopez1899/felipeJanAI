@@ -10,8 +10,11 @@ import random
 import contest.util as util
 
 from contest.capture_agents import CaptureAgent
-from contest.game import Directions
+from contest.game import Directions, Actions
 from contest.util import nearest_point
+
+# Import A* search algorithm
+from search import a_star_search
 
 
 #################
@@ -123,22 +126,25 @@ class ReflexCaptureAgent(CaptureAgent):
 
 
 class OffensiveReflexAgent(ReflexCaptureAgent):
+    """
+    Our offensive agent uses a variety of logical rules to determine the best offensive move.
+    It classifies actions as safe or dangerous based on the distance to the closest ghost.
+    """
     
     def choose_action(self, game_state):
         actions = game_state.get_legal_actions(self.index)
-        if not actions:  # Garantiza que haya al menos una acción válida
-            return Directions.STOP
+        if not actions: return Directions.STOP # if no valid action, stop
 
         food_list = self.get_food(game_state).as_list()
         my_pos = game_state.get_agent_state(self.index).get_position()
         carried_food = game_state.get_agent_state(self.index).num_carrying
 
-        # Detectar agentes defensivos enemigos visibles
+        # Detect defensive enemies
         enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
         ghosts = [a for a in enemies if not a.is_pacman and a.get_position() is not None]
 
-        # Evitar fantasmas cercanos
-        danger_threshold = 3  # Distancia crítica para decidir si recolectar más puntos
+        # Avoid ghosts if they are too close
+        danger_threshold = 3  # critical distance to decide if keep eating or run away
         ghost_positions = [ghost.get_position() for ghost in ghosts]
         safe_actions = actions[:]
         for ghost_pos in ghost_positions:
@@ -148,7 +154,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                 if self.get_maze_distance(pos, ghost_pos) < 2 and action in safe_actions:
                     safe_actions.remove(action)
 
-        # Si no hay acciones seguras, priorizamos alejarnos de los fantasmas
+        # If there are no safe actions, run away. Choose the action that maximizes the distance to the closest ghost.
         if not safe_actions:
             best_action = None
             max_distance = -float('inf')
@@ -162,7 +168,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                     best_action = action
             return best_action if best_action else Directions.STOP
 
-        # 1. Si lleva puntos y hay fantasmas cerca, regresa a casa
+        # If we have points and there are ghosts nearby, return home
         if carried_food > 0:
             close_ghosts = any(self.get_maze_distance(my_pos, ghost_pos) <= danger_threshold for ghost_pos in ghost_positions)
             if close_ghosts:
@@ -177,7 +183,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                         best_action = action
                 return best_action if best_action else random.choice(safe_actions)
 
-    # 2. Si hay alimentos cercanos y los fantasmas están lejos, recolecta más puntos
+        # If there is food nearby and ghosts are far away, collect more food
         if len(food_list) > 0:
             best_action = None
             best_distance = float('inf')
@@ -190,7 +196,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                     best_distance = min_distance
                     best_action = action
 
-        # Antes de regresar a casa, verifica si hay comida cercana y fantasmas lejanos
+            # Before going back home, verify if there is food nearby and ghosts are far away
             next_pos = self.get_successor(game_state, best_action).get_agent_position(self.index)
             next_food_distances = [self.get_maze_distance(next_pos, food) for food in food_list if food != next_pos]
             if next_food_distances:
@@ -201,62 +207,75 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
 
             return best_action if best_action else random.choice(safe_actions)
 
-    # 3. Si no queda comida o hay riesgo, realizar una acción válida
+        # If there is no food left or there is a risk, perform a valid action
         return random.choice(safe_actions if safe_actions else actions)
-
-    def get_features(self, game_state, action):
-        features = util.Counter()
-        successor = self.get_successor(game_state, action)
-        food_list = self.get_food(successor).as_list()
-        features['successor_score'] = -len(food_list)  # self.getScore(successor)
-
-        # Compute distance to the nearest food
-
-        if len(food_list) > 0:  # This should always be True,  but better safe than sorry
-            my_pos = successor.get_agent_state(self.index).get_position()
-            min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
-            features['distance_to_food'] = min_distance
-        # return features
-        
-        return features
-
-
-    def get_weights(self, game_state, action):
-        return {'successor_score': 100, 'distance_to_food': -10, 'distance_to_home': -5}
 
 
 class DefensiveReflexAgent(ReflexCaptureAgent):
     """
-    A reflex agent that keeps its side Pacman-free. Again,
-    this is to give you an idea of what a defensive agent
-    could be like.  It is not the best or only way to make
-    such an agent.
+    Our defensive agent uses A* search to determine the best defensive move.
+    It stays in the capsule until it sees an invader and goes after him.
     """
 
-    def get_features(self, game_state, action):
-        features = util.Counter()
-        successor = self.get_successor(game_state, action)
+    def choose_action(self, game_state):
+        """
+        Uses A* to determine the best defensive move.
+        """
+        # Define the search problem
+        problem = DefensiveSearchProblem(self, game_state)
+        
+        # Compute the path using A* search
+        actions = a_star_search(problem)
+        
+        # Return the first action in the path, or stop if no path is found
+        return actions[0] if actions else Directions.STOP
 
-        my_state = successor.get_agent_state(self.index)
-        my_pos = my_state.get_position()
+class DefensiveSearchProblem:
+    """
+    Search problem for the defensive agent.
+    """
 
-        # Computes whether we're on defense (1) or offense (0)
-        features['on_defense'] = 1
-        if my_state.is_pacman: features['on_defense'] = 0
+    def __init__(self, agent, game_state):
+        self.agent = agent
+        self.start_state = game_state.get_agent_position(agent.index)
+        self.walls = game_state.get_walls()
+        self.opponents = [game_state.get_agent_state(i) for i in agent.get_opponents(game_state)] # All opponent agents' states
+        self.invaders = [a for a in self.opponents if a.is_pacman and a.get_position() is not None] # visible opponents
+        self.capsules = game_state.get_capsules()
+        self.food = agent.get_food_you_are_defending(game_state)
+        self.goal_positions = [a.get_position() for a in self.invaders] or self.capsules # goal is invader position or capsule
 
-        # Computes distance to invaders we can see
-        enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
-        invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
-        features['num_invaders'] = len(invaders)
-        if len(invaders) > 0:
-            dists = [self.get_maze_distance(my_pos, a.get_position()) for a in invaders]
-            features['invader_distance'] = min(dists)
+    def get_start_state(self):
+        return self.start_state
 
-        if action == Directions.STOP: features['stop'] = 1
-        rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
-        if action == rev: features['reverse'] = 1
+    def is_goal_state(self, state):
+        return state in self.goal_positions
 
-        return features
+    def get_successors(self, state):
+        """
+        Function retrieved from PositionSeachProblem of search_agents.py, with now a cost of 1 for each action.
+        """
+        successors = []
+        for action in [Directions.NORTH, Directions.SOUTH, Directions.EAST, Directions.WEST]:
+            x, y = state
+            dx, dy = Actions.direction_to_vector(action)
+            next_x, next_y = int(x + dx), int(y + dy)
+            if not self.walls[next_x][next_y]:
+                next_state = (next_x, next_y)
+                successors.append((next_state, action, 1))
+        return successors
 
-    def get_weights(self, game_state, action):
-        return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2}
+    def get_cost_of_actions(self, actions):
+        """
+        Function retrieved from PositionSeachProblem of search_agents.py.
+        """
+        if actions is None: return 999999
+        x,y= self.get_start_state()
+        cost = 0
+        for action in actions:
+            # Check figure out the next state and see whether its' legal
+            dx, dy = Actions.direction_to_vector(action)
+            x, y = int(x + dx), int(y + dy)
+            if self.walls[x][y]: return 999999
+            cost += self.cost_fn((x, y))
+        return cost
